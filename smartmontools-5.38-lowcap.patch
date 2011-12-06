@@ -1,0 +1,205 @@
+diff -up smartmontools-5.39/configure.in.lowcap smartmontools-5.39/configure.in
+--- smartmontools-5.39/configure.in.lowcap	2009-11-19 10:54:53.000000000 +0100
++++ smartmontools-5.39/configure.in	2009-11-19 11:20:54.645701384 +0100
+@@ -219,6 +219,40 @@ if test "$with_selinux" = "yes"; then
+ 	AC_DEFINE(WITH_SELINUX, [1], [Define to 1 if SELinux support is enabled])
+ fi
+ 
++  AC_ARG_WITH(libcap-ng,
++    [  --with-libcap-ng=[auto/yes/no]  Add Libcap-ng support [default=auto]],,
++    with_libcap_ng=auto)
++
++# Check for Libcap-ng API
++#
++# libcap-ng detection
++
++if test x$with_libcap_ng = xno ; then
++    have_libcap_ng=no;
++else
++    # Start by checking for header file
++    AC_CHECK_HEADER(cap-ng.h, capng_headers=yes, capng_headers=no)
++
++    # See if we have libcap-ng library
++    AC_CHECK_LIB(cap-ng, capng_clear, CAPNG_LDADD=-lcap-ng,)
++
++    # Check results are usable
++    if test x$with_libcap_ng = xyes -a x$CAPNG_LDADD = x ; then
++       AC_MSG_ERROR(libcap-ng support was requested and the library was not found)
++    fi
++    if test x$CAPNG_LDADD != x -a $capng_headers = no ; then
++       AC_MSG_ERROR(libcap-ng libraries found but headers are missing)
++    fi
++fi
++AC_SUBST(CAPNG_LDADD)
++AC_MSG_CHECKING(whether to use libcap-ng)
++if test x$CAPNG_LDADD != x ; then
++    AC_DEFINE(HAVE_LIBCAP_NG,1,[libcap-ng support])
++    AC_MSG_RESULT(yes)
++else
++    AC_MSG_RESULT(no)
++fi
++
+ if test "$prefix" = "NONE"; then
+     dnl no prefix and no mandir, so use ${prefix}/share/man as default
+     if test "$mandir" = '${prefix}/man'; then
+diff -up smartmontools-5.39/Makefile.am.lowcap smartmontools-5.39/Makefile.am
+--- smartmontools-5.39/Makefile.am.lowcap	2009-11-19 10:54:53.000000000 +0100
++++ smartmontools-5.39/Makefile.am	2009-11-19 11:20:54.646634706 +0100
+@@ -45,7 +45,7 @@ smartd_SOURCES =  smartd.cpp      \
+                   utility.cpp     \
+                   utility.h
+ 
+-smartd_LDADD = @os_deps@ @os_libs@
++smartd_LDADD = @os_deps@ @os_libs@ @CAPNG_LDADD@
+ smartd_DEPENDENCIES = @os_deps@
+ 
+ EXTRA_smartd_SOURCES = os_darwin.cpp    \
+diff -up smartmontools-5.39/smartd.8.in.lowcap smartmontools-5.39/smartd.8.in
+--- smartmontools-5.39/smartd.8.in.lowcap	2009-11-19 10:54:53.000000000 +0100
++++ smartmontools-5.39/smartd.8.in	2009-11-19 11:20:54.651596342 +0100
+@@ -175,6 +175,12 @@ input. This is useful for commands like:
+ to perform quick and simple checks without a configuration file.
+ 
+ .TP
++.B \-C, \-\-capabilities
++Use possix \fBcapabilities(7)\fP (EXPERIMENTAL).
++
++Warning: Mail notification does not work when used.
++
++.TP
+ .B \-d, \-\-debug
+ Runs \fBsmartd\fP in "debug" mode. In this mode, it displays status
+ information to STDOUT rather than logging it to SYSLOG and does not
+diff -up smartmontools-5.39/smartd.cpp.lowcap smartmontools-5.39/smartd.cpp
+--- smartmontools-5.39/smartd.cpp.lowcap	2009-11-19 10:54:53.000000000 +0100
++++ smartmontools-5.39/smartd.cpp	2009-11-19 11:36:07.123632685 +0100
+@@ -77,6 +77,10 @@ extern "C" int __stdcall FreeConsole(voi
+ #include <io.h> // setmode()
+ #endif // __CYGWIN__
+ 
++#ifdef HAVE_LIBCAP_NG
++#include <cap-ng.h>
++#endif //LIBCAP_NG
++
+ // locally included files
+ #include "int64.h"
+ #include "atacmds.h"
+@@ -190,6 +194,11 @@ static int facility=LOG_DAEMON;
+ static bool do_fork=true;
+ #endif
+ 
++#ifdef HAVE_LIBCAP_NG
++// enable possix capabilities
++static bool enable_capabilities=false;
++#endif
++
+ // used for control of printing, passing arguments to atacmds.c
+ smartmonctrl *con=NULL;
+ 
+@@ -875,8 +884,7 @@ static void MailWarning(const dev_config
+   const char *unknown="[Unknown]";
+ 
+   // See if user wants us to send mail
+-  if (cfg.emailaddress.empty() && cfg.emailcmdline.empty())
+-    return;
++ 
+ 
+   std::string address = cfg.emailaddress;
+   const char * executable = cfg.emailcmdline.c_str();
+@@ -917,6 +925,15 @@ static void MailWarning(const dev_config
+     if  (epoch<(mail->lastsent+days))
+       return;
+   }
++  
++#ifdef HAVE_LIBCAP_NG
++  if (enable_capabilities) {
++    PrintOut(LOG_ERR,"Sending a mail was supressed. "
++		     "Mails can't be send when capabilites are enabled\n");
++    return;
++  }
++
++#endif
+ 
+   // record the time of this mail message, and the first mail message
+   if (!mail->logged)
+@@ -1464,6 +1481,11 @@ void Usage (void){
+   PrintOut(LOG_INFO,"\n");
+   PrintOut(LOG_INFO,"  -c NAME|-, --configfile=NAME|-\n");
+   PrintOut(LOG_INFO,"        Read configuration file NAME or stdin [default is %s]\n\n", configfile);
++#ifdef HAVE_LIBCAP_NG
++  PrintOut(LOG_INFO,"  -C, --capabilities\n");
++  PrintOut(LOG_INFO,"        Use possix capabilities (EXPERIMENTAL).\n"
++		    "        Warning: Mail notification does not work when used.\n\n");
++#endif
+   PrintOut(LOG_INFO,"  -d, --debug\n");
+   PrintOut(LOG_INFO,"        Start smartd in debug mode\n\n");
+   PrintOut(LOG_INFO,"  -D, --showdirectives\n");
+@@ -3701,7 +3723,7 @@ void ParseOpts(int argc, char **argv){
+   char *tailptr;
+   long lchecktime;
+   // Please update GetValidArgList() if you edit shortopts
+-  const char *shortopts = "c:l:q:dDni:p:r:s:A:B:Vh?";
++  const char *shortopts = "c:l:q:dDni:p:r:s:A:B:VCh?";
+   char *arg;
+   // Please update GetValidArgList() if you edit longopts
+   struct option longopts[] = {
+@@ -3727,6 +3749,9 @@ void ParseOpts(int argc, char **argv){
+     { "copyright",      no_argument,       0, 'V' },
+     { "help",           no_argument,       0, 'h' },
+     { "usage",          no_argument,       0, 'h' },
++#ifdef HAVE_LIBCAP_NG
++    { "capabilities",   no_argument,       0, 'C' },
++#endif
+     { 0,                0,                 0, 0   }
+   };
+ 
+@@ -3885,6 +3910,12 @@ void ParseOpts(int argc, char **argv){
+       PrintOut(LOG_INFO, "%s", format_version_info("smartd", true /*full*/).c_str());
+       EXIT(0);
+       break;
++#ifdef HAVE_LIBCAP_NG
++    case 'C':
++      //enable possix capabilities
++      enable_capabilities=1;
++      break;
++#endif
+     case 'h':
+       // help: print summary of command-line options
+       debugmode=1;
+@@ -4224,6 +4255,16 @@ int main_worker(int argc, char **argv)
+ 
+   bool write_states_always = true;
+ 
++#ifdef HAVE_LIBCAP_NG
++  // Drop capabilities
++  if (enable_capabilities) {
++    capng_clear(CAPNG_SELECT_BOTH);
++    capng_updatev(CAPNG_ADD, (capng_type_t)(CAPNG_EFFECTIVE|CAPNG_PERMITTED),
++                CAP_SYS_ADMIN, CAP_MKNOD, CAP_SYS_RAWIO, -1);
++    capng_apply(CAPNG_SELECT_BOTH);
++  }
++#endif
++
+   // the main loop of the code
+   for (;;) {
+ 
+@@ -4318,7 +4359,18 @@ int main_worker(int argc, char **argv)
+         PrintTestSchedule(configs, states, devices);
+         EXIT(0);
+       }
+-      
++
++#ifdef HAVE_LIBCAP_NG
++      if (enable_capabilities) {
++        for (unsigned i = 0; i < configs.size(); i++) {
++	  if (configs.at(i).emailaddress.empty()) {
++            PrintOut(LOG_WARNING,"Mail can't be enabled together with --capabilities. All mail will be suppressed.\n");
++            break;
++          }
++        }
++      }
++#endif
++
+       // reset signal
+       caughtsigHUP=0;
+ 
